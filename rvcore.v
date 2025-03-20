@@ -1,33 +1,26 @@
-// RiscV nanocore (microcontroller) in verilog, tested through Icarus Verilog
-// Licence MIT
-// Software provided as "as if", be careful to not break your computer :)S
-
-
 module risc_v_core (
-    input wire clk,               
-    input wire reset,             
+    input wire clk,
+    input wire reset,
     input wire [31:0] instruction,
-    output reg [31:0] pc,        
-    output reg [31:0] result     
+    output reg [31:0] pc,
+    output reg [31:0] result
 );
-
 
 reg [31:0] regs [0:31];
 
-// Instruction decode signals
+
 reg [6:0] opcode;
 reg [4:0] rs1, rs2, rd;
 reg [11:0] imm;
 reg [2:0] funct3;
 reg [6:0] funct7;
 
-// PC 
+
 initial begin
     pc = 0;
     result = 0;
     regs[0] = 0;  
 end
-
 
 always @(posedge clk or posedge reset) begin
     if (reset) begin
@@ -43,7 +36,7 @@ always @(posedge clk or posedge reset) begin
         funct7 <= instruction[31:25];
 
         case (opcode)
-            
+            // (ADD, SUB)
             7'b0110011: begin 
                 case (funct3)
                     3'b000: begin
@@ -54,25 +47,17 @@ always @(posedge clk or posedge reset) begin
                         end
                     end
                 endcase
-                regs[rd] <= result;
+                if (rd != 0) regs[rd] <= result; // Prevent writing to x0
             end
 
             //  (ADDI, LI)
             7'b0010011: begin
                 case (funct3)
-                    3'b000: begin
-                        result <= regs[rs1] + {{20{imm[11]}}, imm}; // ADDI (Sign-extend imm)
+                    3'b000: begin 
+                        result <= regs[rs1] + {{20{imm[11]}}, imm}; 
                     end
                 endcase
-                regs[rd] <= result;
-            end
-
-            //  (LI)
-            7'b0010011: begin
-                if (rs1 == 5'b00000) begin // LI is ADDI with rs1 = x0
-                    result <= {{20{imm[11]}}, imm};
-                    regs[rd] <= result;
-                end
+                if (rd != 0) regs[rd] <= result;
             end
 
             
@@ -80,20 +65,38 @@ always @(posedge clk or posedge reset) begin
                 case (funct3)
                     3'b000: begin // BEQ
                         if (regs[rs1] == regs[rs2]) begin
-                            pc <= pc + {{20{instruction[31]}}, instruction[7], instruction[30:25], instruction[11:8], 1'b0};
+                            pc <= pc + {{19{instruction[31]}}, instruction[31], instruction[7], instruction[30:25], instruction[11:8], 1'b0};
                         end
                     end
                     3'b001: begin // BNE
                         if (regs[rs1] != regs[rs2]) begin
-                            pc <= pc + {{20{instruction[31]}}, instruction[7], instruction[30:25], instruction[11:8], 1'b0};
+                            pc <= pc + {{19{instruction[31]}}, instruction[31], instruction[7], instruction[30:25], instruction[11:8], 1'b0};
                         end
                     end
                 endcase
             end
+
+            //  (JAL)
+            7'b1101111: begin
+                result <= pc + 4; // Store return address
+                if (rd != 0) regs[rd] <= result;
+                pc <= pc + {{11{instruction[31]}}, instruction[31], instruction[19:12], instruction[20], instruction[30:21], 1'b0};
+            end
+
+            // (JALR)
+            7'b1100111: begin
+                if (funct3 == 3'b000) begin
+                    result <= pc + 4;
+                    if (rd != 0) regs[rd] <= result;
+                    pc <= (regs[rs1] + {{20{imm[11]}}, imm}) & ~1; // Ensure LSB is 0
+                end
+            end
         endcase
-        
-        // I corrected the PC, implements by +4 now
-        pc <= pc + 4;
+
+        // PC increment unless a branch or jump occurs
+        if (opcode != 7'b1100011 && opcode != 7'b1101111 && opcode != 7'b1100111) begin
+            pc <= pc + 4;
+        end
     end
 end
 
