@@ -1,1 +1,1 @@
-Next step is to code more instructions than "ADD"
+Its start to become a core now. Next step is to link memory for LW.
