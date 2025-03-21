@@ -1,153 +1,135 @@
 module risc_v_core (
     input wire clk,
     input wire reset,
-    input wire [31:0] instruction,  // Instruction input
-    output reg [31:0] pc,           
-    output reg [31:0] result        
+    input wire [31:0] instruction,
+    output reg [31:0] pc,
+    output reg [31:0] result
 );
 
+reg [31:0] regs [0:31];  
+reg [31:0] IF_ID_instr, IF_ID_pc;
+reg [31:0] ID_EX_instr, ID_EX_pc, ID_EX_imm;
+reg [31:0] EX_MEM_instr, EX_MEM_pc, EX_MEM_result;
+reg [31:0] MEM_WB_instr, MEM_WB_pc, MEM_WB_result;
+reg [4:0] EX_MEM_rd, MEM_WB_rd; // FIX: Declare register write-back variables
 
-reg [31:0] regs [0:31]; // RISV 32 registers (x0 to x31x)
-
-// Pipeline registers for FETCH , DECODE ,EXECUTE (3 stages pipeline)
-reg [31:0] IF_pc, IF_instruction; 
-reg [31:0] ID_pc, ID_instruction;  
-reg [31:0] EX_pc, EX_instruction, EX_result; 
-
-// Control signals for instruction decoding
 reg [6:0] opcode;
 reg [4:0] rs1, rs2, rd;
 reg [11:0] imm;
 reg [2:0] funct3;
 reg [6:0] funct7;
-reg [31:0] jump_target;
+reg branch_taken;
 
+// FIX: Register initialization using an explicit loop
+integer i;
 initial begin
+    for (i = 0; i < 32; i = i + 1) begin
+        regs[i] = 0;
+    end
     pc = 0;
     result = 0;
-    regs[0] = 0;  // x0 is always 0
+    branch_taken = 0;
 end
 
-// Fetch instruction and increment PC
-always @(posedge clk or posedge reset) begin
-    if (reset) begin
-        IF_pc <= 0;
-        IF_instruction <= 0;
-    end else begin
-        IF_pc <= pc;
-        IF_instruction <= instruction;
-    end
-end
 
-// ID stage: Decode instruction
 always @(posedge clk or posedge reset) begin
     if (reset) begin
-        ID_pc <= 0;
-        ID_instruction <= 0;
+        pc <= 0;
+        result <= 0;
+        branch_taken <= 0;
     end else begin
-        ID_pc <= IF_pc;
-        ID_instruction <= IF_instruction;
+        IF_ID_instr <= instruction;
+        IF_ID_pc <= pc;
         
-        //  decoding
-        opcode <= ID_instruction[6:0];
-        rd <= ID_instruction[11:7];
-        funct3 <= ID_instruction[14:12];
-        rs1 <= ID_instruction[19:15];
-        rs2 <= ID_instruction[24:20];
-        imm <= ID_instruction[31:20];
-        funct7 <= ID_instruction[31:25];
-    end
-end
+        if (!branch_taken) begin
+            pc <= pc + 4;
+        end
+        branch_taken <= 0; // Reset branch flag
 
-// Execute the instruction (ALU, Branches, Jumps)
-always @(posedge clk or posedge reset) begin
-    if (reset) begin
-        EX_pc <= 0;
-        EX_instruction <= 0;
-        EX_result <= 0;
-        jump_target <= 0;
-    end else begin
-        EX_pc <= ID_pc;
-        EX_instruction <= ID_instruction;
+        
+        opcode  <= IF_ID_instr[6:0];
+        rd      <= IF_ID_instr[11:7];
+        funct3  <= IF_ID_instr[14:12];
+        rs1     <= IF_ID_instr[19:15];
+        rs2     <= IF_ID_instr[24:20];
+        imm     <= IF_ID_instr[31:20];
+        funct7  <= IF_ID_instr[31:25];
 
-        // ALU execution and branch/jump address calculation
+        ID_EX_instr <= IF_ID_instr;
+        ID_EX_pc <= IF_ID_pc;
+        ID_EX_imm <= {{20{imm[11]}}, imm}; 
+
+        
+        $display("Time=%0t | PC=%h | Decoding: OPCODE=%b, RD=%d, RS1=%d, RS2=%d, IMM=%d", 
+                 $time, pc, opcode, rd, rs1, rs2, ID_EX_imm);
+
+        // Execute Stage
+        EX_MEM_instr <= ID_EX_instr;
+        EX_MEM_pc <= ID_EX_pc;
+        EX_MEM_rd <= rd;  // FIX: Store RD for write-back
+
         case (opcode)
-            // ADD/SUB
-            7'b0110011: begin
+            7'b0110011: begin 
                 case (funct3)
                     3'b000: begin
                         if (funct7 == 7'b0000000) begin
-                            EX_result <= regs[rs1] + regs[rs2]; // ADD
+                            EX_MEM_result <= regs[rs1] + regs[rs2]; // ADD
                         end else if (funct7 == 7'b0100000) begin
-                            EX_result <= regs[rs1] - regs[rs2]; // SUB
+                            EX_MEM_result <= regs[rs1] - regs[rs2]; // SUB
                         end
                     end
                 endcase
             end
-
-            // ADDI
-            7'b0010011: begin
+            7'b0010011: begin // I-type (ADDI)
                 case (funct3)
                     3'b000: begin
-                        EX_result <= regs[rs1] + {{20{imm[11]}}, imm}; // ADDI
+                        EX_MEM_result <= regs[rs1] + ID_EX_imm; // ADDI
                     end
                 endcase
             end
-
-            // BEQ (Branch if Equal)
-            7'b1100011: begin
+            7'b1100011: begin // Branch (BEQ, BNE)
                 case (funct3)
                     3'b000: begin // BEQ
                         if (regs[rs1] == regs[rs2]) begin
-                            jump_target <= EX_pc + {{19{instruction[31]}}, instruction[31], instruction[7], instruction[30:25], instruction[11:8], 1'b0};
+                            pc <= ID_EX_pc + {{19{ID_EX_instr[31]}}, ID_EX_instr[31], ID_EX_instr[7], ID_EX_instr[30:25], ID_EX_instr[11:8], 1'b0};
+                            branch_taken <= 1;
                         end
                     end
                     3'b001: begin // BNE
                         if (regs[rs1] != regs[rs2]) begin
-                            jump_target <= EX_pc + {{19{instruction[31]}}, instruction[31], instruction[7], instruction[30:25], instruction[11:8], 1'b0};
+                            pc <= ID_EX_pc + {{19{ID_EX_instr[31]}}, ID_EX_instr[31], ID_EX_instr[7], ID_EX_instr[30:25], ID_EX_instr[11:8], 1'b0};
+                            branch_taken <= 1;
                         end
                     end
                 endcase
             end
-
-            // JAL (Jump and Link)
-            7'b1101111: begin
-                EX_result <= EX_pc + 4; // Store return address
-                jump_target <= EX_pc + {{11{instruction[31]}}, instruction[31], instruction[19:12], instruction[20], instruction[30:21], 1'b0};
+            7'b1101111: begin // JAL
+                EX_MEM_result <= ID_EX_pc + 4;
+                pc <= ID_EX_pc + {{11{ID_EX_instr[31]}}, ID_EX_instr[31], ID_EX_instr[19:12], ID_EX_instr[20], ID_EX_instr[30:21], 1'b0};
+                branch_taken <= 1;
             end
-
-            // JALR (Jump and Link Register)
-            7'b1100111: begin
-                if (funct3 == 3'b000) begin
-                    EX_result <= EX_pc + 4;
-                    jump_target <= (regs[rs1] + {{20{imm[11]}}, imm}) & ~1; // Ensure LSB is 0
-                end
+            7'b1100111: begin // JALR
+                EX_MEM_result <= ID_EX_pc + 4;
+                pc <= (regs[rs1] + ID_EX_imm) & ~1;
+                branch_taken <= 1;
             end
-
         endcase
-    end
-end
 
-// Write-back (WB) stage: Write result to register file if needed
-always @(posedge clk or posedge reset) begin
-    if (reset) begin
-        result <= 0;
-    end else begin
-        // Writing the result back to the register file if rd is not 0
-        if (rd != 0) regs[rd] <= EX_result;
-        result <= EX_result; 
-    end
-end
+        
+        $display("Time=%0t | ALU Result=%h, Writing to RD=%d", $time, EX_MEM_result, EX_MEM_rd);
 
-// PC update
-always @(posedge clk or posedge reset) begin
-    if (reset) begin
-        pc <= 0;
-    end else begin
-        if (opcode == 7'b1100011 || opcode == 7'b1101111 || opcode == 7'b1100111) begin
-            pc <= jump_target; // Update PC on branch or jump
-        end else if (opcode != 7'b1100011 && opcode != 7'b1101111 && opcode != 7'b1100111) begin
-            pc <= pc + 4;  
+        
+        MEM_WB_instr <= EX_MEM_instr;
+        MEM_WB_pc <= EX_MEM_pc;
+        MEM_WB_result <= EX_MEM_result;
+        MEM_WB_rd <= EX_MEM_rd; // FIX: Store RD correctly
+
+       
+        if (MEM_WB_instr[6:0] != 7'b1100011 && MEM_WB_instr[6:0] != 7'b1101111 && MEM_WB_instr[6:0] != 7'b1100111) begin
+            if (MEM_WB_rd != 5'b00000) begin // Don't write to x0
+                regs[MEM_WB_rd] <= MEM_WB_result;
+                $display("Time=%0t | Writing %h to x%d", $time, MEM_WB_result, MEM_WB_rd);
+            end
         end
     end
 end
