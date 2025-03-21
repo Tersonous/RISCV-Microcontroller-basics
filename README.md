@@ -1,2 +1,1 @@
-core pipelining in progress...
-L1 cache ???
+A basic RISC Verilog core with a 3 stages pipeline.
